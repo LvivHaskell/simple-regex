@@ -13,11 +13,13 @@ module Regex
     , parseRegex
     ) where
 
-import           Data.Bifunctor  (first)
-import           Data.Maybe      (fromMaybe)
+import qualified Control.Monad.State as St
 
-import qualified Data.Map.Strict as M
-import qualified Data.Set        as S
+import           Data.Bifunctor      (first)
+import           Data.Maybe          (fromMaybe)
+
+import qualified Data.Map.Strict     as M
+import qualified Data.Set            as S
 
 data Regex
     = SymRegex Sym
@@ -61,77 +63,65 @@ data NFA = NFA
 mergeTransitions :: Transitions -> Transitions -> Transitions
 mergeTransitions = M.unionWith mappend
 
-compile' :: Int -> Regex -> (Int, NFA)
-compile' nextState (SymRegex sym) =
-    ( nextState + 2
-    , NFA
+nextState :: St.State State State
+nextState = St.get <* St.modify (State . succ . getState)
+
+compile' :: Regex -> St.State State NFA
+compile' (SymRegex sym) = do
+    state1 <- nextState
+    state2 <- nextState
+    pure NFA
         { startState     = state1
         , terminalStates = S.singleton state2
         , transitions    = M.singleton (state1, SymTransition sym) (S.singleton state2)
         }
-    )
-  where
-    state1 = State nextState
-    state2 = State (nextState + 1)
-compile' nextState (l :+ r) =
-    ( nextState2
-    , NFA
+compile' (l :+ r) = do
+    lNFA <- compile' l
+    rNFA <- compile' r
+    let newTransitions = M.fromList
+          $ map (\st -> ((st, EpsTransition), S.singleton (startState rNFA)))
+          $ S.toList (terminalStates lNFA)
+    pure NFA
         { startState     = startState lNFA
         , terminalStates = terminalStates rNFA
         , transitions    = newTransitions
             `mergeTransitions` transitions lNFA `mergeTransitions` transitions rNFA
         }
-    )
-  where
-    (nextState1, lNFA) = compile' nextState l
-    (nextState2, rNFA) = compile' nextState1 r
-    newTransitions = M.fromList
-        $ map (\st -> ((st, EpsTransition), S.singleton (startState rNFA)))
-        $ S.toList (terminalStates lNFA)
-compile' nextState (l :| r) =
-    ( nextState2 + 1
-    , NFA
+compile' (l :| r) = do
+    lNFA <- compile' l
+    rNFA <- compile' r
+    state1 <- nextState
+    let newTransitions = M.singleton (state1, EpsTransition)
+          (S.fromList [startState lNFA, startState rNFA])
+    pure NFA
         { startState     = state1
         , terminalStates = S.union (terminalStates lNFA) (terminalStates rNFA)
         , transitions    = newTransitions
             `mergeTransitions` transitions lNFA `mergeTransitions` transitions rNFA
         }
-    )
-  where
-    (nextState1, lNFA) = compile' nextState l
-    (nextState2, rNFA) = compile' nextState1 r
-    newTransitions = M.singleton (state1, EpsTransition)
-        (S.fromList [startState lNFA, startState rNFA])
-    state1 = State nextState2
-compile' nextState (Repeat x) =
-    ( nextState1 + 1
-    , NFA
+compile' (Repeat x) = do
+    xNFA <- compile' x
+    state1 <- nextState
+    let newTransitions = M.fromList
+          $ (:) ((state1, EpsTransition), S.singleton (startState xNFA))
+          $ map (\st -> ((st, EpsTransition), S.singleton state1))
+          $ S.toList
+          $ terminalStates xNFA
+    pure NFA
         { startState     = state1
         , terminalStates = S.singleton state1
         , transitions    = mergeTransitions (transitions xNFA) newTransitions
         }
-    )
-  where
-    (nextState1, xNFA) = compile' nextState x
-    state1 = State nextState1
-    newTransitions = M.fromList
-        $ (:) ((state1, EpsTransition), S.singleton (startState xNFA))
-        $ map (\st -> ((st, EpsTransition), S.singleton state1))
-        $ S.toList
-        $ terminalStates xNFA
-compile' nextState Eps =
-    ( nextState + 1
-    , NFA
+compile' Eps = do
+    state1 <- nextState
+    pure NFA
         { startState     = state1
         , terminalStates = S.singleton state1
         , transitions    = mempty
         }
-    )
-  where
-    state1 = State nextState
 
 compile :: Regex -> NFA
-compile = snd . compile' 0
+compile regex = fst (St.runState (compile' regex) (State 0))
 
 lookupTransition :: (State, Transition) -> Transitions -> S.Set State
 lookupTransition a b = fromMaybe S.empty (M.lookup a b)
